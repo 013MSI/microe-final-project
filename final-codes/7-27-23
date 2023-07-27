@@ -104,7 +104,11 @@ void loop() {
   showBitmap(touchSad, 128-32-32-32, 0);
   //grab water percentage and print to serial monitor
   waterFillPercentage = getWaterPercentage();
- // Serial.println(water_fill_percentage);
+  Serial.print(0); // To freeze the lower limit
+  Serial.print(" ");
+  Serial.print(99); // To freeze the upper limit
+  Serial.print(" ");
+  Serial.println(waterFillPercentage);
   display.setTextSize(2);
   display.setTextColor(WHITE);
   display.setCursor(0, 0);
@@ -119,8 +123,8 @@ int getWaterPercentage() {
   digitalWrite(WATER_POWER, HIGH);
   delay(10);
   waterRaw = analogRead(WATER_READ);
- // Serial.print("Raw: ");
-  //Serial.println(raw_value);
+  Serial.print("Raw: ");
+  Serial.println(waterRaw);
   digitalWrite(WATER_POWER, LOW);
   return map(waterRaw, 0, WATER_LEVEL_MAX, 0, 100);
   //return raw_value;
