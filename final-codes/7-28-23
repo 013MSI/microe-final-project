@@ -53,14 +53,19 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 // photoresistor
 #define LIGHT_PIN 4
 
+// thermistor
+#define HEAT_PIN 36
+
 // button pin
 #define BUTTON_PIN 39
 
 // declare variables
 int waterRaw;                        // raw water sensor reading
-int waterFillPercentage;             // water reading as a percent
+int waterPercentage;             // water reading as a percent
 int lightRaw;                        // raw light reading
 int lightPercentage;                 // light reading as percentage
+int heatRaw;                         // raw heat reading
+int heatTemperature;                 // heat reading as temperature
 const int stepsPerRevolution = 2048; // change this to fit the number of steps per revolution for your motor
 bool touchSensor = 0;                // boolean value measures if touch sensor is touched/activated
 bool bloomieBloomin = 0;             // boolean measures if all environmental variables have been met so bloomie will bloom
@@ -80,14 +85,13 @@ TaskHandle_t stepperTask;
 // initialize the stepper library on pins 8 through 11:
 Stepper myStepper(stepsPerRevolution, STEPPER_IN1, STEPPER_IN2, STEPPER_IN3, STEPPER_IN4);
 
-// calibration
-int calibrationCurrentStage = 0; // What stage we're on.
-
 //initialize min and max readings for calibration
 int WATER_LEVEL_MAX;
 int WATER_LEVEL_MIN;
 int LIGHT_LEVEL_MAX;
 int LIGHT_LEVEL_MIN;
+int HEAT_LEVEL_MIN;
+int HEAT_LEVEL_MAX;
 
 void setup() {
     Serial.begin(115200);
@@ -101,6 +105,7 @@ void setup() {
     pinMode(WATER_READ, INPUT);
     pinMode(LIGHT_PIN, INPUT);
     pinMode(BUTTON_PIN, INPUT);
+    pinMode(HEAT_PIN, INPUT);
     digitalWrite(WATER_POWER, LOW);
     // Clear the buffer
     display.clearDisplay();
@@ -125,28 +130,33 @@ void setup() {
 }
 
 void loop() {
+    // grab converted readings
+    waterPercentage = getWaterPercentage();
+    lightPercentage = getLightPercentage();
+    heatTemperature = getHeatTemperature();
+
+    // display readings on OLED
     display.setTextSize(1);
     display.setTextColor(WHITE);
-    display.setCursor(0, 0);
+    display.setCursor(0, 32);
+    display.println(waterPercentage);
+    display.setCursor(0, 48);
+    display.println(waterRaw);
+    display.setCursor(32, 32);
+    display.println(lightPercentage);
+    display.setCursor(32, 48);
+    display.println(lightRaw);
+    display.setCursor(64, 32);
+    display.println(heatTemperature);
+    display.setCursor(64, 48);
+    display.println(heatRaw);
     // display OLED icons
-    showBitmap(waterSad, 128 - 32, 0);
+    showBitmap(waterSad, 0, 0);
     showBitmap(smileyy, 128 - 32, 0 + 32);
-    showBitmap(sunSad, 128 - 32 - 32, 0);
-    showBitmap(thermSad, 128 - 32 - 32, 0 + 32);
-    showBitmap(touchSad, 128 - 32 - 32 - 32, 0);
-    // grab water percentage and print to serial monitor
-    waterFillPercentage = getWaterPercentage();
-    Serial.print("water:");
-    Serial.println(waterFillPercentage);
-    // grab light percentage and print to serial monitor
-    lightPercentage = getLightPercentage();
-    Serial.print("light:");
-    Serial.println(lightPercentage);
+    showBitmap(sunSad, 32, 0);
+    showBitmap(thermSad, 64, 0);
+    showBitmap(touchSad, 128 - 32, 0);
 
-    display.setTextSize(2);
-    display.setTextColor(WHITE);
-    display.setCursor(0, 0);
-    display.println(waterFillPercentage);
     display.display();
     display.clearDisplay();
     delay(50);
@@ -164,6 +174,21 @@ int getLightPercentage() {
     delay(10);
     lightRaw = analogRead(LIGHT_PIN);
     return constrain(map(lightRaw, 0, LIGHT_LEVEL_MAX, 0, 100), 0, 100);
+}
+
+int getHeatTemperature(){
+    delay(10);
+    heatRaw = analogRead(HEAT_PIN);
+    float R1 = 10000;
+    float logR2, R2;
+    float c1 = 1.009249522e-03, c2 = 2.378405444e-04, c3 = 2.019202697e-07;
+    R2 = R1 * (1023.0 / (float)heatRaw - 1.0);
+    logR2 = log(R2);
+    heatTemperature = (1.0 / (c1 + c2*logR2 + c3*logR2*logR2*logR2));
+    heatTemperature = heatTemperature - 273.15;
+    heatTemperature = (heatTemperature * 9.0)/ 5.0 + 32.0; 
+
+    return heatTemperature;
 }
 
 void stepperTaskFunction(void *pvParameters) {
@@ -256,6 +281,30 @@ void calibrateFunction() {
     lightRaw = analogRead(LIGHT_PIN);
     LIGHT_LEVEL_MAX = lightRaw;
 
+    //get min heat level
+    display.clearDisplay();
+    display.display();
+    delay(1000);
+    display.setCursor(0, 0);
+    display.println("Great job! Now, move Bloomie into the coldest place in your house.");
+    display.println("When you're done, press the button.");
+    display.display();
+    waitForButtonPress();
+    heatRaw = analogRead(HEAT_PIN);
+    HEAT_LEVEL_MIN = heatRaw;
+
+    //get max heat level
+    display.clearDisplay();
+    display.display();
+    delay(1000);
+    display.setCursor(0, 0);
+    display.println("Great job! Now, move Bloomie into the hottest place in your house.");
+    display.println("When you're done, press the button.");
+    display.display();
+    waitForButtonPress();
+    heatRaw = analogRead(HEAT_PIN);
+    HEAT_LEVEL_MAX = heatRaw;
+
     //notify user that they're done
     display.clearDisplay();
     display.display();
@@ -269,11 +318,15 @@ void calibrateFunction() {
 
     //Print min/max values
     Serial.print("Max water: ");
-    Serial.print(WATER_LEVEL_MAX);
-    Serial.println("Min water: ");
-    Serial.print(WATER_LEVEL_MIN);
-    Serial.println("Max light: ");
-    Serial.print(LIGHT_LEVEL_MAX);
-    Serial.println("Min light: ");
-    Serial.print(LIGHT_LEVEL_MIN);
+    Serial.println(WATER_LEVEL_MAX);
+    Serial.print("Min water: ");
+    Serial.println(WATER_LEVEL_MIN);
+    Serial.print("Max light: ");
+    Serial.println(LIGHT_LEVEL_MAX);
+    Serial.print("Min light: ");
+    Serial.println(LIGHT_LEVEL_MIN);
+    Serial.print("Max heat: ");
+    Serial.println(HEAT_LEVEL_MAX);
+    Serial.print("Min heat: ");
+    Serial.println(HEAT_LEVEL_MIN);
 }
