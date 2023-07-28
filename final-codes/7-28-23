@@ -163,7 +163,7 @@ int getWaterPercentage() {
 int getLightPercentage() {
     delay(10);
     lightRaw = analogRead(LIGHT_PIN);
-    return constrain(map(lightRaw, 0, WATER_LEVEL_MAX, 0, 100), 0, 100);
+    return constrain(map(lightRaw, 0, LIGHT_LEVEL_MAX, 0, 100), 0, 100);
 }
 
 void stepperTaskFunction(void *pvParameters) {
