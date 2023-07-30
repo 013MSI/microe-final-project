@@ -61,7 +61,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // declare variables
 int waterRaw;                        // raw water sensor reading
-int waterPercentage;             // water reading as a percent
+int waterFillPercentage;             // water reading as a percent
 int lightRaw;                        // raw light reading
 int lightPercentage;                 // light reading as percentage
 int heatRaw;                         // raw heat reading
@@ -84,6 +84,9 @@ TaskHandle_t stepperTask;
 
 // initialize the stepper library on pins 8 through 11:
 Stepper myStepper(stepsPerRevolution, STEPPER_IN1, STEPPER_IN2, STEPPER_IN3, STEPPER_IN4);
+
+// calibration
+int calibrationCurrentStage = 0; // What stage we're on.
 
 //initialize min and max readings for calibration
 int WATER_LEVEL_MAX;
@@ -131,7 +134,7 @@ void setup() {
 
 void loop() {
     // grab converted readings
-    waterPercentage = getWaterPercentage();
+    waterFillPercentage = getWaterPercentage();
     lightPercentage = getLightPercentage();
     heatTemperature = getHeatTemperature();
 
@@ -139,7 +142,7 @@ void loop() {
     display.setTextSize(1);
     display.setTextColor(WHITE);
     display.setCursor(0, 32);
-    display.println(waterPercentage);
+    display.println(waterFillPercentage);
     display.setCursor(0, 48);
     display.println(waterRaw);
     display.setCursor(32, 32);
