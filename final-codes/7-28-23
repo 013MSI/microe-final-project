@@ -44,7 +44,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define STEPPER_IN4 32
 
 // touch sensor pins
-#define TOUCH_SIG 36
+#define TOUCH_SIG 23
 
 // water sensor
 #define WATER_READ 15
