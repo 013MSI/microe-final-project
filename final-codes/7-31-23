@@ -19,7 +19,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <DHT.h>
-#include <filters.h>
+#include <movingAvg.h>
 
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
@@ -63,12 +63,14 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // declare variables
 int waterRaw;                        // raw water sensor reading
+int waterAvg;
 int waterFillPercentage;             // water reading as a percent
 int lightRaw;                        // raw light reading
+int lightAvg;
 int lightPercentage;                 // light reading as percentage
 float dhtTemperature;                   // DHT Temp reading (F)
 float heatRaw;                         // raw heat reading
-float heatTemperature;                 // heat reading as temperature
+float heatAvg;
 const int stepsPerRevolution = 2048; // change this to fit the number of steps per revolution for your motor
 bool touchSensor = 0;                // boolean value measures if touch sensor is touched/activated
 bool bloomieBloomin = 0;             // boolean measures if all environmental variables have been met so bloomie will bloom
@@ -81,6 +83,20 @@ extern const unsigned char waterSad[128];
 extern const unsigned char sunSad[128];
 extern const unsigned char thermSad[128];
 extern const unsigned char touchSad[128];
+extern const unsigned char touchHappy[128];
+extern const unsigned char waterHappy[128];
+extern const unsigned char sunHappy[128];
+extern const unsigned char thermHappy[128];
+extern const unsigned char frown[128];
+
+//moving avg
+movingAvg avgWater(10);
+
+movingAvg avgLight(10);
+
+movingAvg avgHeat(10);
+
+
 
 // Multicore Tasks
 TaskHandle_t secondTask;
@@ -90,12 +106,6 @@ Stepper myStepper(stepsPerRevolution, STEPPER_IN1, STEPPER_IN2, STEPPER_IN3, STE
 
 //dht initialize
 DHT dht(DHT_PIN, DHT11);
-
-//filter initialize
-const float cutoff_freq   = 20.0;  //Cutoff frequency in Hz
-const float sampling_time = 0.01; //Sampling time in seconds. Should match delay for get functions
-IIR::ORDER  order  = IIR::ORDER::OD3; // Order (OD1 to OD4)
-Filter lowPass(cutoff_freq, sampling_time, order);
 
 //initialize min and max readings for calibration
 int WATER_LEVEL_MAX;
@@ -139,6 +149,11 @@ void setup() {
     // button stuff
     currentButtonState = digitalRead(BUTTON_PIN);
 
+    //moving avg
+    avgWater.begin();
+    avgLight.begin();
+    avgHeat.begin();
+
     // === CALIBRATION === //
     calibrateFunction();
 }
@@ -148,33 +163,35 @@ void loop() {
     dhtTemperature = getDHTTemperature();
     waterFillPercentage = getWaterPercentage();
     lightPercentage = getLightPercentage();
-    heatTemperature = getHeatTemperature();
-
     // display readings on OLED
     display.setTextSize(1);
     display.setTextColor(WHITE);
     display.setCursor(0, 32);
     display.println(waterFillPercentage);
-    display.setCursor(0, 48);
+    display.setCursor(0, 44);
     display.println(waterRaw);
+    display.setCursor(0, 56);
+    display.println(waterAvg);
     display.setCursor(32, 32);
     display.println(lightPercentage);
     display.setCursor(32, 48);
     display.println(lightRaw);
     display.setCursor(64, 32);
     display.println(dhtTemperature);
-    //display.setCursor(64, 48);
-    //display.println(heatRaw);
-    // display OLED icons
-    showBitmap(waterSad, 0, 0);
-    showBitmap(smileyy, 128 - 32, 0 + 32);
-    showBitmap(sunSad, 32, 0);
-    showBitmap(thermSad, 64, 0);
-    showBitmap(touchSad, 128 - 32, 0);
+    //display icons
+    updateIcons();
 
     display.display();
     display.clearDisplay();
     delay(50);
+
+    //check if bloomie is happy
+    if(waterFillPercentage > 50 && lightPercentage > 50 && dhtTemperature > 80){
+      bloomieBloomin = 1;
+    }
+    else{
+      bloomieBloomin = 0;
+    }
 }
 
 int getWaterPercentage() {
@@ -182,29 +199,15 @@ int getWaterPercentage() {
     delay(10);
     waterRaw = analogRead(WATER_READ);
     digitalWrite(WATER_POWER, LOW);
+    waterAvg = avgWater.reading(waterRaw);
     return constrain(map(waterRaw, WATER_LEVEL_MIN, WATER_LEVEL_MAX, 0, 100), 0, 100);
 }
 
 int getLightPercentage() {
     delay(10);
     lightRaw = analogRead(LIGHT_PIN);
-    lightRaw = lowPass.filterIn(lightRaw);
+    lightAvg = avgLight.reading(lightRaw);
     return constrain(map(lightRaw, 0, LIGHT_LEVEL_MAX, 0, 100), 0, 100);
-}
-
-float getHeatTemperature(){
-    float R1 = 10000;
-    float logR2, R2;
-    float c1 = 1.009249522e-03, c2 = 2.378405444e-04, c3 = 2.019202697e-07;
-    heatRaw = analogRead(HEAT_PIN);
-    //Serial.println(heatRaw);
-    R2 = R1 * (1023.0 / float(heatRaw) - 1.0);
-    logR2 = log(R2);
-    heatTemperature = (1.0 / (c1 + c2*logR2 + c3*logR2*logR2*logR2));
-    heatTemperature = heatTemperature - 273.15;
-    heatTemperature = (heatTemperature * 9.0)/ 5.0 + 32.0; 
-    //Serial.println(heatTemperature);
-    return heatTemperature;
 }
 
 void secondTaskFunction(void *pvParameters) {
@@ -297,7 +300,7 @@ void calibrateFunction() {
     lightRaw = analogRead(LIGHT_PIN);
     LIGHT_LEVEL_MAX = lightRaw;
 
-    //get min heat level
+    /*//get min heat level
     display.clearDisplay();
     display.display();
     delay(1000);
@@ -319,7 +322,7 @@ void calibrateFunction() {
     display.display();
     waitForButtonPress();
     heatRaw = analogRead(HEAT_PIN);
-    HEAT_LEVEL_MAX = heatRaw;
+    HEAT_LEVEL_MAX = heatRaw;*/
 
     //notify user that they're done
     display.clearDisplay();
@@ -341,15 +344,44 @@ void calibrateFunction() {
     Serial.println(LIGHT_LEVEL_MAX);
     Serial.print("Min light: ");
     Serial.println(LIGHT_LEVEL_MIN);
-    Serial.print("Max heat: ");
+    /*Serial.print("Max heat: ");
     Serial.println(HEAT_LEVEL_MAX);
     Serial.print("Min heat: ");
-    Serial.println(HEAT_LEVEL_MIN);
+    Serial.println(HEAT_LEVEL_MIN);*/
 }
 
 float getDHTTemperature(){
   float temp = dht.readTemperature(true);
+  heatAvg = avgHeat.reading(temp);
   return temp;
 }
 
-
+void updateIcons(){
+  // display OLED icons
+  if(waterFillPercentage > 50){
+    showBitmap(waterHappy, 0, 0);
+  }
+  else{
+    showBitmap(waterSad, 0, 0);
+  }
+  if(lightPercentage > 50){
+    showBitmap(sunHappy, 32, 0);
+  }
+  else{
+    showBitmap(sunSad, 32, 0);
+  }
+  if(dhtTemperature > 81){
+    showBitmap(thermHappy, 64, 0);
+  }
+  else{
+    showBitmap(thermSad, 64, 0);
+  }
+  if(bloomieBloomin){
+    showBitmap(smileyy, 128 - 32, 0 + 32);
+  }
+  else{
+    showBitmap(frown, 128 - 32, 0 + 32);
+  }
+  //showBitmap(smileyy, 128 - 32, 0 + 32);
+  showBitmap(touchSad, 128 - 32, 0);
+}
