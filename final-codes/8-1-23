@@ -194,11 +194,11 @@ void loop() {
     touchSensor = getTouchSensor();
 
     //set bluetooth service characteristics to the readings
-    waterCharacteristic->setValue(waterFillPercentage);
+    waterCharacteristic->setValue(String(waterFillPercentage).c_str());
     waterCharacteristic->notify();
-    lightCharacteristic->setValue(lightPercentage);
+    lightCharacteristic->setValue(String(lightPercentage).c_str());
     lightCharacteristic->notify();
-    heatCharacteristic->setValue(dhtTemperature);
+    heatCharacteristic->setValue(String(dhtTemperature).c_str());
     heatCharacteristic->notify();
 
     // display readings on OLED
