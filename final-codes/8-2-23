@@ -1,0 +1,523 @@
+#include <Arduino.h>
+#include <Stepper.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <DHT.h>
+#include <movingAvg.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <BLE2902.h>
+
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+
+// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
+// The pins for I2C are defined by the Wire-library.
+// On an arduino UNO:       A4(SDA), A5(SCL)
+// On an arduino MEGA 2560: 20(SDA), 21(SCL)
+// On an arduino LEONARDO:   2(SDA),  3(SCL), ...
+#define OLED_RESET -1       // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// all measurements are in mm
+#define WATER_SENSOR_HEIGHT 42
+#define POND_DIAMETER 183
+#define STEM_DIAMETER 48
+#define POND_DEPTH 67
+
+// Stepper pins
+#define STEPPER_IN1 26
+#define STEPPER_IN2 25 // for some reason, In2 and In3 must be switched for stepper to work. IN2 is actually 33, IN3 is actually 25.
+#define STEPPER_IN3 33
+#define STEPPER_IN4 32
+
+// water sensor
+#define WATER_READ 15
+#define WATER_POWER 0
+
+// photoresistor
+#define LIGHT_PIN 4
+
+// button pin (I am using touch sensor as a replacement, wire the SIG to the button pin)
+#define BUTTON_PIN 39
+
+//dht
+#define DHT_PIN 19
+
+//touch sensor for stem
+#define TOUCH_PIN 2
+
+// bluetooth services
+#define CALIBRATION_SERVICE_UUID "510c73b0-300e-11ee-aea4-0800200c9a66"
+#define CALIBRATION_SERVICE_COUNTER_CHARACTERISTIC_UUID "4eb63c1d-4492-4f0e-9ffb-060be0d8e21c"
+#define WATER_LEVEL_SERVICE_UUID "5e6d0579-6c16-4acd-a8e3-087797ba300b"
+#define WATER_LEVEL_VAL_UUID "64e14ad8-c35b-4a40-98a2-a4ee5da845f5"
+#define LIGHT_LEVEL_SERVICE_UUID "7efab126-fbf3-49b4-85ab-cef7acb0b0ef"
+#define LIGHT_LEVEL_VAL_UUID "a4d4f96b-cadd-4d61-81eb-ec45cdd652f2"
+#define HEAT_LEVEL_SERVICE_UUID "b88bf1fa-47a4-4133-8cca-2a2f7be9ae5f"
+#define HEAT_LEVEL_VAL_UUID "4882f2b7-19db-4ce6-897d-e320187550f2"
+
+BLECharacteristic *calibrationCharacteristic;
+BLECharacteristic *waterCharacteristic;
+BLECharacteristic *lightCharacteristic;
+BLECharacteristic *heatCharacteristic;
+
+
+// declare variables
+int waterRaw;                        // raw water sensor reading
+int waterAvg;
+int waterFillPercentage;             // water reading as a percent
+int lightRaw;                        // raw light reading
+int lightAvg;
+int lightPercentage;                 // light reading as percentage
+float dhtTemperature;                   // DHT Temp reading (F)
+float heatAvg;                          //avg DHT
+const int stepsPerRevolution = 2048; // change this to fit the number of steps per revolution for your motor
+bool touchSensor = 0;                // boolean value measures if touch sensor is touched/activated
+bool bloomieBloomin = 0;             // boolean measures if all environmental variables have been met so bloomie will bloom
+
+int lastButtonState;    // the previous state of button
+int currentButtonState; // the current state of button
+
+int lastBloomieState = 0;
+int currentBloomieState = 0;
+
+extern const unsigned char smileyy[128];
+extern const unsigned char waterSad[128];
+extern const unsigned char sunSad[128];
+extern const unsigned char thermSad[128];
+extern const unsigned char touchSad[128];
+extern const unsigned char touchHappy[128];
+extern const unsigned char waterHappy[128];
+extern const unsigned char sunHappy[128];
+extern const unsigned char thermHappy[128];
+extern const unsigned char frown[128];
+
+//moving avg
+movingAvg avgWater(10);
+
+movingAvg avgLight(10);
+
+movingAvg avgHeat(10);
+
+
+
+// Multicore Tasks
+TaskHandle_t secondTask;
+
+// initialize the stepper library on pins 8 through 11:
+Stepper myStepper(stepsPerRevolution, STEPPER_IN1, STEPPER_IN2, STEPPER_IN3, STEPPER_IN4);
+
+//dht initialize
+DHT dht(DHT_PIN, DHT11);
+
+//initialize min and max readings for calibration
+int WATER_LEVEL_MAX;
+int WATER_LEVEL_MIN;
+int LIGHT_LEVEL_MAX;
+int LIGHT_LEVEL_MIN;
+int HEAT_LEVEL_MIN;
+int HEAT_LEVEL_MAX;
+
+int calibrationStage = 0;
+bool debounce = false;
+
+class CalibrationCallback : public BLECharacteristicCallbacks
+{
+public:
+  void onWrite(BLECharacteristic *characteristic_) override
+  {
+    Serial.println("Data received!");
+    calibrationStage = atoi(characteristic_->getValue().c_str());
+    Serial.println(calibrationStage);
+  }
+};
+
+void setup() {
+    Serial.begin(115200);
+
+    //setup bluetooth
+    bluetoothSetup();
+
+    dht.begin();
+    delay(2000);
+    // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
+    if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) { // Address 0x3D for 128x64
+        Serial.println(F("SSD1306 allocation failed"));
+        for (;;)
+            ; // Don't proceed, loop forever
+    }
+    pinMode(WATER_POWER, OUTPUT);
+    pinMode(WATER_READ, INPUT);
+    pinMode(LIGHT_PIN, INPUT);
+    pinMode(BUTTON_PIN, INPUT);
+    digitalWrite(WATER_POWER, LOW);
+    // Clear the buffer
+    display.clearDisplay();
+
+    // set up stepper speed
+    myStepper.setSpeed(15);
+
+    // button stuff
+    currentButtonState = digitalRead(BUTTON_PIN);
+
+    //moving avg
+    avgWater.begin();
+    avgLight.begin();
+    avgHeat.begin();
+
+    // === CALIBRATION === //
+    calibrateFunction();
+
+    //stepper task
+    xTaskCreatePinnedToCore(
+        secondTaskFunction, /* Function to implement the task */
+        "secondTask",       /* Name of the task */
+        10000,               /* Stack size in words */
+        NULL,                /* Task input parameter */
+        0,                   /* Priority of the task */
+        &secondTask,        /* Task handle. */
+        0);                  /* Core where the task should run */
+
+    //Make bloomie close
+    myStepper.step(3500);
+}
+
+void loop() {
+    // grab converted readings/environmental variables
+    dhtTemperature = getDHTTemperature();
+    waterFillPercentage = getWaterPercentage();
+    lightPercentage = getLightPercentage();
+    touchSensor = getTouchSensor();
+
+    //set bluetooth service characteristics to the readings
+    waterCharacteristic->setValue(String(waterFillPercentage).c_str());
+    waterCharacteristic->notify();
+    lightCharacteristic->setValue(String(lightPercentage).c_str());
+    lightCharacteristic->notify();
+    heatCharacteristic->setValue(String(dhtTemperature).c_str());
+    heatCharacteristic->notify();
+
+    // display readings on OLED
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(0, 32);
+    display.println(waterFillPercentage);
+    display.setCursor(0, 44);
+    display.println(waterRaw);
+    display.setCursor(0, 56);
+    display.println(waterAvg);
+    display.setCursor(32, 32);
+    display.println(lightPercentage);
+    display.setCursor(32, 44);
+    display.println(lightRaw);
+    display.setCursor(32, 56);
+    display.println(lightAvg);
+    display.setCursor(64, 32);
+    display.println(dhtTemperature);
+    display.setCursor(64, 56);
+    display.println(heatAvg);
+    //display icons
+    updateIcons();
+
+    display.display();
+    display.clearDisplay();
+    delay(50);
+}
+
+bool getTouchSensor(){
+  if(digitalRead(TOUCH_PIN) == 1){
+    return true;
+  }
+  else{
+    return false;
+  }
+}
+
+int getWaterPercentage() {
+    digitalWrite(WATER_POWER, HIGH);
+    delay(10);
+    waterRaw = analogRead(WATER_READ);
+    digitalWrite(WATER_POWER, LOW);
+    waterAvg = avgWater.reading(waterRaw);
+    return constrain(map(waterRaw, WATER_LEVEL_MIN, WATER_LEVEL_MAX, 0, 100), 0, 100);
+}
+
+int getLightPercentage() {
+    delay(10);
+    lightRaw = analogRead(LIGHT_PIN);
+    lightAvg = avgLight.reading(lightRaw);
+    return constrain(map(lightRaw, 0, LIGHT_LEVEL_MAX, 0, 100), 0, 100);
+}
+
+void secondTaskFunction(void *pvParameters) {
+    for (;;) {
+        lastBloomieState = currentBloomieState;         // save the last state
+        currentBloomieState = bloomieBloomin; // read new state
+
+        if (lastBloomieState == true && currentBloomieState == false) {
+          Serial.println("Stepping 3500");
+          myStepper.step(3500);
+        } 
+        else if (lastBloomieState == false && currentBloomieState == true){
+          Serial.println("Stepping NEGATIVE 3500");
+          myStepper.step(-3500);
+        }
+        else {
+          //do nothing because nothing has changed, current == last
+        }
+    }
+}
+
+void waitForButtonPress() {
+    for (;;) {
+        if (buttonFunction()) {
+            break;
+        }
+    }
+}
+
+bool buttonFunction() {
+    lastButtonState = currentButtonState;         // save the last state
+    currentButtonState = digitalRead(BUTTON_PIN); // read new state
+
+    if (lastButtonState == HIGH && currentButtonState == LOW) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+void calibrateFunction() {
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  for (;;){
+    if(buttonFunction()){
+      Serial.println("yesssssssssssssssss");
+      calibrationStage += 1;
+    }
+    if (calibrationStage == 0) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Let's set up your bloomie!");
+    display.println("Use the app, or click the button to continue.");
+    display.display();
+    }
+    if(calibrationStage == 1) {
+
+    //get min water level
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("We need to get a few things set up for your Bloomie.");
+    display.println("Make sure your water sensor is dry, then press the button");
+    display.display();
+    }
+    
+    if(calibrationStage == 2) {
+      if (debounce == false) {
+        digitalWrite(WATER_POWER, HIGH);
+        delay(10);
+        waterRaw = analogRead(WATER_READ);
+        digitalWrite(WATER_POWER, LOW);
+        WATER_LEVEL_MIN = waterRaw;
+        debounce = true;
+      }
+  
+      //get max water level
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.println("Great job! Now, fill up the Bloomie pond with water so that it reaches the top of the sensor.");
+      display.println("When you're done, press the button.");
+      display.display();
+    }
+    
+    if(calibrationStage == 3){
+      if (debounce == true) {
+        digitalWrite(WATER_POWER, HIGH);
+        waterRaw = analogRead(WATER_READ);
+        digitalWrite(WATER_POWER, LOW);
+        WATER_LEVEL_MAX = waterRaw;
+        debounce = false;
+      }
+  
+      //get min light level
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.println("Great job! Now, move Bloomie into a dark room (or cover up Bloomie's sun detector).");
+      display.println("When you're done, press the button.");
+      display.display();
+    }
+    
+    if(calibrationStage == 4){
+      if (debounce == false) {
+        lightRaw = analogRead(LIGHT_PIN);
+        LIGHT_LEVEL_MIN = lightRaw;
+        debounce = true;
+      }
+  
+      //get max light level
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.println("Great job! Now, move Bloomie into the sun and make sure Bloomie's sun detector is facing the sun.");
+      display.println("When you're done, press the button.");
+      display.display();
+    }
+    
+    if(calibrationStage == 5)
+    {
+      if (debounce == true) {
+        lightRaw = analogRead(LIGHT_PIN);
+        LIGHT_LEVEL_MAX = lightRaw;
+        debounce = false;
+      }
+  
+      //notify user that they're done
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.println("Terrific! You're all set up to play with your new Bloomie!");
+      display.display();
+      delay(5000);
+      display.clearDisplay();
+      display.display();
+  
+      //Print min/max values
+      Serial.print("Max water: ");
+      Serial.println(WATER_LEVEL_MAX);
+      Serial.print("Min water: ");
+      Serial.println(WATER_LEVEL_MIN);
+      Serial.print("Max light: ");
+      Serial.println(LIGHT_LEVEL_MAX);
+      Serial.print("Min light: ");
+      Serial.println(LIGHT_LEVEL_MIN);
+      /*Serial.print("Max heat: ");
+      Serial.println(HEAT_LEVEL_MAX);
+      Serial.print("Min heat: ");
+      Serial.println(HEAT_LEVEL_MIN);*/
+      break;
+    }
+    
+  }
+  
+}
+
+float getDHTTemperature(){
+  float temp = dht.readTemperature(true);
+  heatAvg = avgHeat.reading(temp);
+  return temp;
+}
+
+void updateIcons(){
+  //check if bloomie is happy
+    if(waterFillPercentage > 50 && lightPercentage > 50 && dhtTemperature > 80 && touchSensor == 0){
+      bloomieBloomin = 1;
+    }
+    else{
+      bloomieBloomin = 0;
+    }
+  // display OLED icons
+  if(waterFillPercentage > 50){
+    showBitmap(waterHappy, 0, 0);
+  }
+  else{
+    showBitmap(waterSad, 0, 0);
+  }
+  if(lightPercentage > 50){
+    showBitmap(sunHappy, 32, 0);
+  }
+  else{
+    showBitmap(sunSad, 32, 0);
+  }
+  if(dhtTemperature > 81){
+    showBitmap(thermHappy, 64, 0);
+  }
+  else{
+    showBitmap(thermSad, 64, 0);
+  }
+  if(touchSensor == 0){
+    showBitmap(touchHappy, 128 - 32, 0);
+  }
+  else{
+    showBitmap(touchSad, 128 - 32, 0);
+  }
+  if(bloomieBloomin){
+    showBitmap(smileyy, 128 - 32, 0 + 32);
+  }
+  else{
+    showBitmap(frown, 128 - 32, 0 + 32);
+  }
+}
+
+void bluetoothSetup(){
+  //=== BLUETOOTH SETUP ===//
+
+    // Server Device Setup
+    BLEDevice::init("Bloomie");
+    BLEServer *bloomieServer = BLEDevice::createServer();
+  // Services and Characteristics
+    //Calibration Service
+    BLEService *calibrationService = bloomieServer->createService(CALIBRATION_SERVICE_UUID);
+    calibrationCharacteristic = calibrationService->createCharacteristic(
+                                         CALIBRATION_SERVICE_COUNTER_CHARACTERISTIC_UUID,
+                                         BLECharacteristic::PROPERTY_READ |
+                                         BLECharacteristic::PROPERTY_WRITE
+                                       );
+
+    calibrationCharacteristic->setValue("calibration characteristic placeholder");
+    calibrationCharacteristic->setCallbacks(new CalibrationCallback());
+    calibrationService->start();
+  
+    //Water level service
+    BLEService *waterService = bloomieServer->createService(WATER_LEVEL_SERVICE_UUID);
+    waterCharacteristic = waterService->createCharacteristic(
+                                         WATER_LEVEL_VAL_UUID,
+                                         BLECharacteristic::PROPERTY_READ |
+                                         BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
+                                       );
+
+    waterCharacteristic->addDescriptor(new BLE2902());
+    waterCharacteristic->setValue("water characteristic placeholder");
+    waterService->start();
+  
+    //Light level service
+    BLEService *lightService = bloomieServer->createService(LIGHT_LEVEL_SERVICE_UUID);
+    lightCharacteristic = lightService->createCharacteristic(
+                                         LIGHT_LEVEL_VAL_UUID,
+                                         BLECharacteristic::PROPERTY_READ |
+                                         BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
+                                       );
+
+    lightCharacteristic->addDescriptor(new BLE2902());
+    lightCharacteristic->setValue("light characteristic placeholder");
+    lightService->start();
+
+    //Heat level service
+    BLEService *heatService = bloomieServer->createService(HEAT_LEVEL_SERVICE_UUID);
+    heatCharacteristic = heatService->createCharacteristic(
+                                         HEAT_LEVEL_VAL_UUID,
+                                         BLECharacteristic::PROPERTY_READ |
+                                         BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
+                                       );
+
+    heatCharacteristic->addDescriptor(new BLE2902());
+    heatCharacteristic->setValue("heat characteristic placeholder");
+    heatService->start();
+  
+    // BLEAdvertising setup
+    BLEAdvertising *bloomieAdvertising = BLEDevice::getAdvertising();
+    //Add services to the advertiser
+    bloomieAdvertising->addServiceUUID(CALIBRATION_SERVICE_UUID);
+    bloomieAdvertising->addServiceUUID(WATER_LEVEL_SERVICE_UUID);
+    bloomieAdvertising->addServiceUUID(LIGHT_LEVEL_SERVICE_UUID);
+    bloomieAdvertising->addServiceUUID(HEAT_LEVEL_SERVICE_UUID);
+
+    //Initialize advertising
+    bloomieAdvertising->setScanResponse(true);
+    bloomieAdvertising->setMinPreferred(0x06);  // functions that help with iPhone     connections issue
+    bloomieAdvertising->setMinPreferred(0x12);
+    BLEDevice::startAdvertising();
+  
+  //=== BLUETOOTH SETUP ===//
+}
